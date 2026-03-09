@@ -9,6 +9,6 @@ MYSQL_CONFIG = {
     "host": "localhost",
     "port": 3306,
     "database": "ecommerce_dw",
-    "user": "root",
-    "password": "root"
+    "user": "etl_user",
+    "password": "etl123"
 }
