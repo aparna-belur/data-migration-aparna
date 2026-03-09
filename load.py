@@ -183,53 +183,103 @@ def is_full_load(cursor, table_name):
 # INCREMENTAL LOGIC
 # -----------------------------------
 
-def incremental_load(cursor, df, table_name):
+def incremental_load(cursor, conn, df, table_name):
 
-    for _, row in df.iterrows():
+    # -----------------------------------
+    # STEP 1: GET EXISTING ACTIVE ROWS
+    # -----------------------------------
 
-        source_id = row["_source_object_id"]
-        array_index = row["_array_index"]
-        row_hash = row["row_hash"]
+    query = f"""
+    SELECT _source_object_id, _array_index, row_hash
+    FROM `{table_name}`
+    WHERE is_active = TRUE
+    """
 
-        cursor.execute(f"""
-        SELECT row_hash
-        FROM `{table_name}`
-        WHERE _source_object_id=%s
-        AND _array_index=%s
-        AND is_active=TRUE
-        """, (source_id, array_index))
+    existing_df = pd.read_sql(query, conn)
 
-        existing = cursor.fetchone()
+    # If table empty → insert everything
+    if existing_df.empty:
+        insert_dataframe(cursor, df, table_name)
+        return
 
-        # NEW RECORD
-        if existing is None:
 
-            insert_dataframe(
-                cursor,
-                pd.DataFrame([row]),
-                table_name
-            )
+    # -----------------------------------
+    # STEP 2: MERGE SOURCE + TARGET
+    # -----------------------------------
+    
+    df["_array_index"] = df["_array_index"].astype(str)
+    existing_df["_array_index"] = existing_df["_array_index"].astype(str)
 
-        # UPDATED RECORD
-        elif existing[0] != row_hash:
+    
+    merged = df.merge(
+        existing_df,
+        on=["_source_object_id", "_array_index"],
+        how="left",
+        suffixes=("", "_existing")
+    )
 
-            cursor.execute(f"""
-            UPDATE `{table_name}`
-            SET is_active=FALSE
-            WHERE _source_object_id=%s
-            AND _array_index=%s
-            AND is_active=TRUE
-            """, (source_id, array_index))
 
-            insert_dataframe(
-                cursor,
-                pd.DataFrame([row]),
-                table_name)
+    # -----------------------------------
+    # STEP 3: IDENTIFY NEW RECORDS
+    # -----------------------------------
 
-        # UNCHANGED RECORD
-        else:
-            pass
+    new_rows = merged[
+        merged["row_hash_existing"].isna()
+    ].copy()
 
+
+    # -----------------------------------
+    # STEP 4: IDENTIFY UPDATED RECORDS
+    # -----------------------------------
+
+    updated_rows = merged[
+        (merged["row_hash_existing"].notna()) &
+        (merged["row_hash_existing"] != merged["row_hash"])
+    ].copy()
+
+
+    # -----------------------------------
+    # STEP 5: REMOVE HELPER COLUMN
+    # -----------------------------------
+
+    cols = df.columns
+
+    new_rows = new_rows[cols]
+    updated_rows = updated_rows[cols]
+
+
+    # -----------------------------------
+    # STEP 6: DEACTIVATE OLD ROWS
+    # -----------------------------------
+
+    if not updated_rows.empty:
+
+        update_query = f"""
+        UPDATE `{table_name}`
+        SET is_active = FALSE
+        WHERE _source_object_id = %s
+        AND _array_index = %s
+        AND is_active = TRUE
+        """
+
+        update_values = updated_rows[
+            ["_source_object_id", "_array_index"]
+        ].values.tolist()
+
+        cursor.executemany(update_query, update_values)
+
+
+    # -----------------------------------
+    # STEP 7: INSERT NEW + UPDATED ROWS
+    # -----------------------------------
+
+    rows_to_insert = pd.concat(
+        [new_rows, updated_rows],
+        ignore_index=True
+    )
+
+    if not rows_to_insert.empty:
+        insert_dataframe(cursor, rows_to_insert, table_name)
 
 # -----------------------------------
 # MAIN LOAD FUNCTION
@@ -279,7 +329,7 @@ def load_data(df, table_name,
 
         else:
 
-            incremental_load(cursor,
+            incremental_load(cursor,conn,
                              df,
                              table_name)
 
