@@ -6,13 +6,90 @@ from config import MONGO_CONFIG, MYSQL_CONFIG
 _SYSTEM_COLS = {"row_hash", "etl_loaded_at", "is_active"}
 
 def _norm_ts(v):
-    """Normalize timestamps for comparison."""
     if v is None:
         return None
     try:
         return pd.to_datetime(v)
     except:
         return None
+    
+def _mongo_flattened_count(collection_name):
+    """
+    Compute flattened row count directly from MongoDB, including array fields.
+    This handles nested arrays/objects and returns a total number of denormalized rows.
+    """
+    client = MongoClient(MONGO_CONFIG["uri"])
+    db = client[MONGO_CONFIG["database"]]
+    collection = db[collection_name]
+
+    # Recursive JS function to flatten nested documents & arrays
+    flatten_js = """
+    function(doc) {
+        function explodeArrays(obj) {
+            const result = [{}];
+            for (let key in obj) {
+                const value = obj[key];
+                let temp = [];
+                if (Array.isArray(value) && value.length > 0 && typeof value[0] === 'object') {
+                    // for array of objects, recursively flatten each element
+                    value.forEach(el => {
+                        explodeArrays(el).forEach(f => {
+                            Object.keys(f).forEach(k => f[k] = f[k]);
+                            temp.push(Object.assign({}, ...result.map(r => Object.assign({}, r)), f));
+                        });
+                    });
+                    result.splice(0, result.length, ...temp);
+                } else if (typeof value === 'object' && value !== null) {
+                    // nested object
+                    let nested = explodeArrays(value);
+                    nested.forEach(f => {
+                        temp.push(Object.assign({}, ...result.map(r => Object.assign({}, r)), f));
+                    });
+                    result.splice(0, result.length, ...temp);
+                } else {
+                    // primitive or empty array
+                    result.forEach(r => r[key] = value);
+                }
+            }
+            return result;
+        }
+        return explodeArrays(doc);
+    }
+    """
+
+    try:
+        # Aggregate pipeline: unwind top-level arrays recursively
+        pipeline = [
+            {
+                "$project": {
+                    "flattened": {
+                        "$function": {
+                            "body": flatten_js,
+                            "args": ["$$ROOT"],
+                            "lang": "js"
+                        }
+                    }
+                }
+            },
+            {"$unwind": "$flattened"},
+            {"$replaceRoot": {"newRoot": "$flattened"}},
+            {"$count": "flattened_rows"}
+        ]
+
+        result = list(collection.aggregate(pipeline))
+        if result:
+            count = result[0]["flattened_rows"]
+        else:
+            count = 0
+
+    except Exception as e:
+        print(f"Error computing Mongo flatten count for {collection_name}: {e}")
+        count = 0
+
+    finally:
+        client.close()
+
+    return count
 
 def reconcile_collection(collection_name, df_transformed):
     """
