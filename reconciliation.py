@@ -14,10 +14,6 @@ def _norm_ts(v):
         return None
     
 def _mongo_flattened_count(collection_name):
-    """
-    Compute flattened row count directly from MongoDB, including array fields.
-    This handles nested arrays/objects and returns a total number of denormalized rows.
-    """
     client = MongoClient(MONGO_CONFIG["uri"])
     db = client[MONGO_CONFIG["database"]]
     collection = db[collection_name]
@@ -92,10 +88,6 @@ def _mongo_flattened_count(collection_name):
     return count
 
 def reconcile_collection(collection_name, df_transformed):
-    """
-    Realistic reconciliation for SCD2 ETL:
-    - df_transformed: flattened DataFrame after transform()
-    """
 
     # -------------------------
     # MongoDB client
@@ -132,13 +124,20 @@ def reconcile_collection(collection_name, df_transformed):
     """)
     mysql_active_count = cursor.fetchone()["cnt"]
 
-    # Total loaded rows in MySQL
+    # Total loaded rows in MySQL (currently active)
     cursor.execute(f"""
         SELECT COUNT(*) AS cnt
         FROM `{collection_name}`
         WHERE is_active=1
     """)
     mysql_total_count = cursor.fetchone()["cnt"]
+    
+    # Total loaded rows in MySQL
+    cursor.execute(f"""
+        SELECT COUNT(*) AS cnt
+        FROM `{collection_name}`
+    """)
+    total_records = cursor.fetchone()["cnt"]
 
     # Max timestamp in MySQL
     if timestamp_cols:
@@ -198,6 +197,8 @@ def reconcile_collection(collection_name, df_transformed):
     print(f"Collection: {collection_name}")
     print(f"Distinct IDs: Mongo={mongo_doc_count}, MySQL={mysql_active_count}")
     print(f"Flattened rows: Mongo={mongo_flattened_count}, MySQL={mysql_total_count}")
+    print(f"Total records in MySQL: {total_records}")
+    
     if missing_in_mysql:
         print(f"IDs missing in MySQL: {len(missing_in_mysql)} (sample {list(missing_in_mysql)[:5]})")
     if missing_in_mongo:
@@ -221,6 +222,7 @@ def reconcile_collection(collection_name, df_transformed):
         "mongo_flattened_count": mongo_flattened_count,
         "mysql_active_count": mysql_active_count,
         "mysql_total_count": mysql_total_count,
+        "total_records": total_records,
         "missing_in_mysql": missing_in_mysql,
         "missing_in_mongo": missing_in_mongo,
         "mongo_max_ts": mongo_max_ts,
