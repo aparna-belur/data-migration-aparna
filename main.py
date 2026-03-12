@@ -1,6 +1,7 @@
 from extract import extract, get_collections
 from transform import transform
 from load import load_data
+from reconciliation import reconcile_collection
 
 
 def main():
@@ -17,6 +18,8 @@ def main():
             load_data(df, collection,"last_updated")
 
             print(f"{collection} loaded successfully")
+            
+            reconcile_collection(collection, df)
 
         except Exception as e:
 
